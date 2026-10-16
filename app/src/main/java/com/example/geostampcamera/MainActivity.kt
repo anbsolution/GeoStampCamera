@@ -383,7 +383,7 @@ class MainActivity : AppCompatActivity() {
         val proScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             clipToPadding = false
-            fillViewport = false
+            isFillViewport = false
             addView(advancedRow)
         }
         controls.addView(
