@@ -123,192 +123,275 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildUi() {
-        val bg = Color.rgb(14, 17, 22)
-        val panel = Color.rgb(25, 30, 38)
-        val buttonBg = Color.rgb(43, 51, 63)
-        val accent = Color.rgb(67, 220, 190)
-        val muted = Color.rgb(171, 182, 196)
+        val bg = Color.rgb(10, 13, 18)
+        val panel = Color.rgb(23, 28, 36)
+        val buttonBg = Color.rgb(37, 44, 55)
+        val accent = Color.rgb(57, 220, 185)
+        val muted = Color.rgb(158, 170, 186)
+        val density = resources.displayMetrics.density
+        fun dp(value: Int) = (value * density).toInt()
 
-        fun rounded(color: Int, radiusDp: Float = 16f): GradientDrawable = GradientDrawable().apply {
-            setColor(color)
-            cornerRadius = radiusDp * resources.displayMetrics.density
-        }
-        fun styleButton(button: Button, color: Int = buttonBg, textColor: Int = Color.WHITE,
-                        radius: Float = 14f, textSize: Float = 13f) {
+        fun rounded(color: Int, radiusDp: Float = 16f): GradientDrawable =
+            GradientDrawable().apply {
+                setColor(color)
+                cornerRadius = radiusDp * density
+            }
+
+        fun styleButton(
+            button: Button,
+            color: Int = buttonBg,
+            textColor: Int = Color.WHITE,
+            radius: Float = 14f,
+            textSize: Float = 13f,
+            minHeightDp: Int = 42
+        ) {
             button.isAllCaps = false
             button.textSize = textSize
             button.setTextColor(textColor)
+            button.typeface = android.graphics.Typeface.create(
+                "sans-serif-medium", android.graphics.Typeface.NORMAL
+            )
             button.background = rounded(color, radius)
             button.backgroundTintList = null
-            button.minHeight = (42 * resources.displayMetrics.density).toInt()
-            button.minimumHeight = button.minHeight
-            button.setPadding(12, 0, 12, 0)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) button.stateListAnimator = null
+            button.minHeight = dp(minHeightDp)
+            button.minimumHeight = dp(minHeightDp)
+            button.setPadding(dp(10), 0, dp(10), 0)
+            button.maxLines = 1
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                button.stateListAnimator = null
+            }
         }
-        fun rowParams(weight: Float = 1f): LinearLayout.LayoutParams =
+
+        fun rowParams(weight: Float = 1f, marginDp: Int = 3): LinearLayout.LayoutParams =
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, weight).apply {
-                setMargins(4, 4, 4, 4)
+                setMargins(dp(marginDp), dp(3), dp(marginDp), dp(3))
             }
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(bg)
-            setPadding(12, 0, 12, 8)
+            setPadding(dp(12), 0, dp(12), dp(8))
         }
 
+        // Compact, consistent top bar
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(4, 14, 4, 12)
+            setPadding(dp(3), dp(12), dp(3), dp(10))
         }
         val brandStack = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val title = TextView(this).apply {
             text = "GeoStamp Camera"
-            textSize = 21f
+            textSize = 20f
             setTextColor(Color.WHITE)
-            typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+            typeface = android.graphics.Typeface.create(
+                "sans-serif-medium", android.graphics.Typeface.NORMAL
+            )
+            includeFontPadding = false
         }
         val subtitle = TextView(this).apply {
-            text = "CAPTURE • STAMP • SHARE"
-            textSize = 10f
-            letterSpacing = 0.12f
+            text = "LOCATION  •  PHOTO  •  SHARE"
+            textSize = 9f
+            letterSpacing = 0.13f
             setTextColor(muted)
-            setPadding(1, 2, 0, 0)
+            setPadding(dp(1), dp(4), 0, 0)
+            includeFontPadding = false
         }
         brandStack.addView(title)
         brandStack.addView(subtitle)
-        header.addView(brandStack, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        header.addView(
+            brandStack,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
         val settingsQuick = Button(this).apply {
             text = "⚙"
             contentDescription = "Camera and watermark settings"
             textSize = 20f
             setOnClickListener { showSettingsDialog() }
         }
-        styleButton(settingsQuick, panel, Color.WHITE, 16f, 20f)
-        settingsQuick.minWidth = (48 * resources.displayMetrics.density).toInt()
+        styleButton(settingsQuick, panel, Color.WHITE, 15f, 20f, 44)
+        settingsQuick.minWidth = dp(54)
         header.addView(settingsQuick)
         root.addView(header)
 
+        // Large, uncluttered viewfinder
         val previewContainer = FrameLayout(this).apply {
-            background = rounded(Color.BLACK, 22f)
+            background = rounded(Color.BLACK, 24f)
             clipToOutline = true
+            elevation = dp(2).toFloat()
         }
         previewView = PreviewView(this).apply {
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             scaleType = PreviewView.ScaleType.FILL_CENTER
+            contentDescription = "Camera viewfinder. Tap to focus and pinch to zoom."
         }
         gridOverlay = GridOverlay(this).apply { visibility = View.GONE }
-        previewContainer.addView(previewView, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
-        ))
-        previewContainer.addView(gridOverlay, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
-        ))
-        root.addView(previewContainer, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
-        ).apply { setMargins(0, 0, 0, 10) })
+        previewContainer.addView(
+            previewView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        previewContainer.addView(
+            gridOverlay,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        root.addView(
+            previewContainer,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+            ).apply { setMargins(0, 0, 0, dp(9)) }
+        )
 
+        // GPS status as a quiet information strip
         statusText = TextView(this).apply {
-            text = "Finding GPS location…"
-            textSize = 12f
+            text = "⌖  Finding GPS location…"
+            textSize = 11f
             setTextColor(muted)
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(14, 9, 14, 9)
+            setPadding(dp(12), dp(8), dp(12), dp(8))
             background = rounded(panel, 12f)
             maxLines = 2
+            includeFontPadding = false
         }
-        root.addView(statusText, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { setMargins(0, 0, 0, 8) })
+        root.addView(
+            statusText,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, dp(7)) }
+        )
 
+        // Bottom control dock
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(4, 6, 4, 2)
+            setPadding(dp(6), dp(5), dp(6), dp(5))
             background = rounded(panel, 22f)
         }
-        val firstRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
-        val secondRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
+
         fun makeButton(label: String, action: () -> Unit): Button = Button(this).apply {
             text = label
             setOnClickListener { action() }
-            styleButton(this)
+            styleButton(this, minHeightDp = 40)
         }
-        fun addRowButton(row: LinearLayout, label: String, action: () -> Unit) {
-            row.addView(makeButton(label, action), rowParams())
+
+        val utilityRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
         }
-        addRowButton(firstRow, "Flip") {
+        fun addUtility(label: String, action: () -> Unit) {
+            utilityRow.addView(makeButton(label, action), rowParams())
+        }
+        addUtility("↻  Flip") {
             cameraFacing = if (cameraFacing == CameraSelector.LENS_FACING_BACK)
                 CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
             flashEnabled = false
             cameraControl?.enableTorch(false)
             startCamera()
         }
-        addRowButton(firstRow, if (flashEnabled) "Flash On" else "Flash") {
+        addUtility(if (flashEnabled) "⚡  Flash On" else "⚡  Flash") {
             flashEnabled = !flashEnabled
             try {
                 cameraControl?.enableTorch(flashEnabled)
-                Toast.makeText(this, if (flashEnabled) "Flash on" else "Flash off", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    this,
+                    if (flashEnabled) "Flash on" else "Flash off",
+                    Toast.LENGTH_SHORT
+                ).show()
             } catch (_: Exception) {
                 flashEnabled = false
-                Toast.makeText(this, "Flash is camera par available nahi hai", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    this, "Flash is camera par available nahi hai", Toast.LENGTH_SHORT
+                ).show()
             }
         }
-        addRowButton(firstRow, "Grid") {
+        addUtility(if (gridEnabled) "▦  Grid On" else "▦  Grid") {
             gridEnabled = !gridEnabled
             gridOverlay.visibility = if (gridEnabled) View.VISIBLE else View.GONE
-            Toast.makeText(this, if (gridEnabled) "Grid on" else "Grid off", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this, if (gridEnabled) "Grid on" else "Grid off", Toast.LENGTH_SHORT
+            ).show()
         }
-        addRowButton(secondRow, "Gallery") { openGallery() }
-        captureButton = makeButton("●  PHOTO") { takePhoto() }.apply {
-            textSize = 15f
-            typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
-            minHeight = (54 * resources.displayMetrics.density).toInt()
-            minimumHeight = minHeight
-        }
-        styleButton(captureButton, accent, Color.rgb(8, 28, 27), 28f, 15f)
-        secondRow.addView(captureButton, rowParams(1.35f))
-        addRowButton(secondRow, "Share") { shareLastPhoto() }
+        controls.addView(utilityRow)
 
-        val proRow = LinearLayout(this).apply {
+        val captureRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        captureRow.addView(
+            makeButton("Gallery") { openGallery() },
+            rowParams(0.85f, 3)
+        )
+        captureButton = makeButton("●  CAPTURE") { takePhoto() }.apply {
+            textSize = 15f
+            minHeight = dp(52)
+            minimumHeight = dp(52)
+            contentDescription = "Take photo"
+        }
+        styleButton(captureButton, accent, Color.rgb(7, 25, 24), 28f, 15f, 52)
+        captureRow.addView(captureButton, rowParams(1.45f, 3))
+        captureRow.addView(
+            makeButton("Share") { shareLastPhoto() },
+            rowParams(0.85f, 3)
+        )
+        controls.addView(captureRow)
+
+        // Advanced controls are compact and horizontally scrollable on small phones
+        val advancedRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 2, 0, 4)
+            setPadding(0, dp(2), 0, 0)
         }
         val zoomMinus = makeButton("−") { changeZoom(-0.5f) }
-        proRow.addView(zoomMinus)
+        advancedRow.addView(zoomMinus, LinearLayout.LayoutParams(dp(42), dp(38)))
         zoomLabel = TextView(this).apply {
             text = "1.0×"
-            textSize = 13f
+            textSize = 12f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            setPadding(8, 8, 8, 8)
-            minWidth = 52
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+            minWidth = dp(48)
+            includeFontPadding = false
         }
-        proRow.addView(zoomLabel)
-        proRow.addView(makeButton("+") { changeZoom(0.5f) })
-        proRow.addView(makeButton("EV −") { changeExposure(-1) })
-        proRow.addView(makeButton("EV +") { changeExposure(1) })
+        advancedRow.addView(zoomLabel)
+        advancedRow.addView(
+            makeButton("+") { changeZoom(0.5f) },
+            LinearLayout.LayoutParams(dp(42), dp(38))
+        )
+        advancedRow.addView(
+            makeButton("EV −") { changeExposure(-1) },
+            LinearLayout.LayoutParams(dp(62), dp(38)).apply { setMargins(dp(3), 0, dp(3), 0) }
+        )
+        advancedRow.addView(
+            makeButton("EV +") { changeExposure(1) },
+            LinearLayout.LayoutParams(dp(62), dp(38)).apply { setMargins(dp(3), 0, dp(3), 0) }
+        )
         timerButton = makeButton("Timer ${timerLabel()}") { cycleTimer() }
+        advancedRow.addView(
+            timerButton,
+            LinearLayout.LayoutParams(dp(88), dp(38)).apply { setMargins(dp(3), 0, dp(3), 0) }
+        )
         qualityButton = makeButton(qualityLabel()) { cycleQuality() }
-        proRow.addView(timerButton)
-        proRow.addView(qualityButton)
+        advancedRow.addView(
+            qualityButton,
+            LinearLayout.LayoutParams(dp(88), dp(38)).apply { setMargins(dp(3), 0, dp(3), 0) }
+        )
         val proScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             clipToPadding = false
-            addView(proRow)
+            fillViewport = false
+            addView(advancedRow)
         }
-        controls.addView(firstRow)
-        controls.addView(secondRow)
-        controls.addView(proScroll, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-        ))
+        controls.addView(
+            proScroll,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
         root.addView(controls)
         setContentView(root)
     }
