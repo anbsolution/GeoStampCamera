@@ -12,18 +12,10 @@ android {
         applicationId = "com.example.geostampcamera"
         minSdk = 23
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 6
+        versionName = "1.5-ui-ux"
     }
 
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    kotlinOptions {
-        jvmTarget = "17"
-    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

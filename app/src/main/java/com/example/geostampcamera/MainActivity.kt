@@ -17,14 +17,21 @@ import android.location.LocationManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
+import android.util.Size
 import android.view.View
 import android.widget.Button
 import android.app.AlertDialog
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.HorizontalScrollView
+import android.graphics.drawable.GradientDrawable
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -33,7 +40,10 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.CameraControl
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
@@ -45,6 +55,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
     private lateinit var previewView: PreviewView
@@ -56,12 +67,30 @@ class MainActivity : AppCompatActivity() {
     private var locationManager: LocationManager? = null
     private var cameraFacing = CameraSelector.LENS_FACING_BACK
     private var cameraControl: CameraControl? = null
+    private var maxZoomRatio = 4f
+    private var zoomRatio = 1f
+    private var exposureIndex = 0
+    private var minExposureIndex = 0
+    private var maxExposureIndex = 0
+    private lateinit var zoomLabel: TextView
+    private lateinit var timerButton: Button
+    private lateinit var qualityButton: Button
+    private lateinit var gridOverlay: GridOverlay
+    private var gridEnabled = false
+    private lateinit var scaleGestureDetector: ScaleGestureDetector
     private var flashEnabled = false
     private var lastSavedUri: Uri? = null
     private var showDateTime = true
     private var showCoordinates = true
     private var showPlaceName = true
     private var watermarkPosition = 0 // 0=bottom-left, 1=bottom-right, 2=top-left, 3=top-right
+    private var timerSeconds = 0
+    private var photoQuality = 94
+    private var ultraHdMode = false
+    private var watermarkTextColor = Color.WHITE
+    private var watermarkBackgroundAlpha = 0x99
+    private var countdownActive = false
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
@@ -84,45 +113,119 @@ class MainActivity : AppCompatActivity() {
         showCoordinates = prefs.getBoolean("show_coordinates", true)
         showPlaceName = prefs.getBoolean("show_place_name", true)
         watermarkPosition = prefs.getInt("watermark_position", 0).coerceIn(0, 3)
+        timerSeconds = prefs.getInt("timer_seconds", 0).coerceIn(0, 10)
+        photoQuality = prefs.getInt("photo_quality", 94).coerceIn(75, 100)
+        ultraHdMode = prefs.getBoolean("ultra_hd_mode", false)
+        watermarkTextColor = prefs.getInt("watermark_text_color", Color.WHITE)
+        watermarkBackgroundAlpha = prefs.getInt("watermark_bg_alpha", 0x99).coerceIn(0x40, 0xE0)
         buildUi()
         requestNeededPermissions()
     }
 
     private fun buildUi() {
+        val bg = Color.rgb(14, 17, 22)
+        val panel = Color.rgb(25, 30, 38)
+        val buttonBg = Color.rgb(43, 51, 63)
+        val accent = Color.rgb(67, 220, 190)
+        val muted = Color.rgb(171, 182, 196)
+
+        fun rounded(color: Int, radiusDp: Float = 16f): GradientDrawable = GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = radiusDp * resources.displayMetrics.density
+        }
+        fun styleButton(button: Button, color: Int = buttonBg, textColor: Int = Color.WHITE,
+                        radius: Float = 14f, textSize: Float = 13f) {
+            button.isAllCaps = false
+            button.textSize = textSize
+            button.setTextColor(textColor)
+            button.background = rounded(color, radius)
+            button.backgroundTintList = null
+            button.minHeight = (42 * resources.displayMetrics.density).toInt()
+            button.minimumHeight = button.minHeight
+            button.setPadding(12, 0, 12, 0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) button.stateListAnimator = null
+        }
+        fun rowParams(weight: Float = 1f): LinearLayout.LayoutParams =
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, weight).apply {
+                setMargins(4, 4, 4, 4)
+            }
+
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.BLACK)
+            setBackgroundColor(bg)
+            setPadding(12, 0, 12, 8)
         }
 
-        val header = TextView(this).apply {
-            text = "GEOSTAMP CAMERA"
-            textSize = 18f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            setPadding(12, 18, 12, 12)
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(4, 14, 4, 12)
         }
+        val brandStack = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val title = TextView(this).apply {
+            text = "GeoStamp Camera"
+            textSize = 21f
+            setTextColor(Color.WHITE)
+            typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+        }
+        val subtitle = TextView(this).apply {
+            text = "CAPTURE • STAMP • SHARE"
+            textSize = 10f
+            letterSpacing = 0.12f
+            setTextColor(muted)
+            setPadding(1, 2, 0, 0)
+        }
+        brandStack.addView(title)
+        brandStack.addView(subtitle)
+        header.addView(brandStack, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        val settingsQuick = Button(this).apply {
+            text = "⚙"
+            contentDescription = "Camera and watermark settings"
+            textSize = 20f
+            setOnClickListener { showSettingsDialog() }
+        }
+        styleButton(settingsQuick, panel, Color.WHITE, 16f, 20f)
+        settingsQuick.minWidth = (48 * resources.displayMetrics.density).toInt()
+        header.addView(settingsQuick)
         root.addView(header)
 
+        val previewContainer = FrameLayout(this).apply {
+            background = rounded(Color.BLACK, 22f)
+            clipToOutline = true
+        }
         previewView = PreviewView(this).apply {
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+            scaleType = PreviewView.ScaleType.FILL_CENTER
         }
-        root.addView(previewView, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+        gridOverlay = GridOverlay(this).apply { visibility = View.GONE }
+        previewContainer.addView(previewView, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
         ))
+        previewContainer.addView(gridOverlay, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+        root.addView(previewContainer, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+        ).apply { setMargins(0, 0, 0, 10) })
 
         statusText = TextView(this).apply {
-            text = "Location dhoondh rahe hain..."
-            textSize = 13f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            setPadding(12, 10, 12, 10)
+            text = "Finding GPS location…"
+            textSize = 12f
+            setTextColor(muted)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(14, 9, 14, 9)
+            background = rounded(panel, 12f)
+            maxLines = 2
         }
-        root.addView(statusText)
+        root.addView(statusText, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { setMargins(0, 0, 0, 8) })
 
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(8, 4, 8, 14)
+            setPadding(4, 6, 4, 2)
+            background = rounded(panel, 22f)
         }
         val firstRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -134,17 +237,20 @@ class MainActivity : AppCompatActivity() {
         }
         fun makeButton(label: String, action: () -> Unit): Button = Button(this).apply {
             text = label
-            isAllCaps = false
             setOnClickListener { action() }
+            styleButton(this)
         }
-        firstRow.addView(makeButton("Flip") {
+        fun addRowButton(row: LinearLayout, label: String, action: () -> Unit) {
+            row.addView(makeButton(label, action), rowParams())
+        }
+        addRowButton(firstRow, "Flip") {
             cameraFacing = if (cameraFacing == CameraSelector.LENS_FACING_BACK)
                 CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
             flashEnabled = false
             cameraControl?.enableTorch(false)
             startCamera()
-        })
-        firstRow.addView(makeButton("Flash") {
+        }
+        addRowButton(firstRow, if (flashEnabled) "Flash On" else "Flash") {
             flashEnabled = !flashEnabled
             try {
                 cameraControl?.enableTorch(flashEnabled)
@@ -153,17 +259,157 @@ class MainActivity : AppCompatActivity() {
                 flashEnabled = false
                 Toast.makeText(this, "Flash is camera par available nahi hai", Toast.LENGTH_SHORT).show()
             }
-        })
-        firstRow.addView(makeButton("Settings") { showSettingsDialog() })
+        }
+        addRowButton(firstRow, "Grid") {
+            gridEnabled = !gridEnabled
+            gridOverlay.visibility = if (gridEnabled) View.VISIBLE else View.GONE
+            Toast.makeText(this, if (gridEnabled) "Grid on" else "Grid off", Toast.LENGTH_SHORT).show()
+        }
+        addRowButton(secondRow, "Gallery") { openGallery() }
+        captureButton = makeButton("●  PHOTO") { takePhoto() }.apply {
+            textSize = 15f
+            typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+            minHeight = (54 * resources.displayMetrics.density).toInt()
+            minimumHeight = minHeight
+        }
+        styleButton(captureButton, accent, Color.rgb(8, 28, 27), 28f, 15f)
+        secondRow.addView(captureButton, rowParams(1.35f))
+        addRowButton(secondRow, "Share") { shareLastPhoto() }
 
-        secondRow.addView(makeButton("Gallery") { openGallery() })
-        captureButton = makeButton("PHOTO") { takePhoto() }.apply { textSize = 16f }
-        secondRow.addView(captureButton)
-        secondRow.addView(makeButton("Share") { shareLastPhoto() })
+        val proRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 2, 0, 4)
+        }
+        val zoomMinus = makeButton("−") { changeZoom(-0.5f) }
+        proRow.addView(zoomMinus)
+        zoomLabel = TextView(this).apply {
+            text = "1.0×"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(8, 8, 8, 8)
+            minWidth = 52
+        }
+        proRow.addView(zoomLabel)
+        proRow.addView(makeButton("+") { changeZoom(0.5f) })
+        proRow.addView(makeButton("EV −") { changeExposure(-1) })
+        proRow.addView(makeButton("EV +") { changeExposure(1) })
+        timerButton = makeButton("Timer ${timerLabel()}") { cycleTimer() }
+        qualityButton = makeButton(qualityLabel()) { cycleQuality() }
+        proRow.addView(timerButton)
+        proRow.addView(qualityButton)
+        val proScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            clipToPadding = false
+            addView(proRow)
+        }
         controls.addView(firstRow)
         controls.addView(secondRow)
+        controls.addView(proScroll, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
         root.addView(controls)
         setContentView(root)
+    }
+
+    private fun setupPreviewGestures() {
+        scaleGestureDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                val control = cameraControl ?: return false
+                zoomRatio = (zoomRatio * detector.scaleFactor).coerceIn(1f, maxZoomRatio.coerceAtLeast(1f))
+                control.setZoomRatio(zoomRatio)
+                if (::zoomLabel.isInitialized) zoomLabel.text = "%.1f×".format(Locale.US, zoomRatio)
+                return true
+            }
+        })
+        previewView.setOnTouchListener { _, event ->
+            scaleGestureDetector.onTouchEvent(event)
+            if (event.action == MotionEvent.ACTION_UP && !scaleGestureDetector.isInProgress) {
+                try {
+                    val point = previewView.meteringPointFactory.createPoint(event.x, event.y)
+                    val action = FocusMeteringAction.Builder(point)
+                        .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                        .build()
+                    cameraControl?.startFocusAndMetering(action)
+                } catch (_: Exception) { }
+            }
+            true
+        }
+    }
+
+    private fun timerLabel(): String = if (timerSeconds == 0) "Off" else "${timerSeconds}s"
+
+    private fun qualityLabel(): String = when {
+        ultraHdMode -> "Ultra HD"
+        photoQuality >= 99 -> "Max"
+        photoQuality >= 93 -> "High"
+        else -> "Standard"
+    }
+
+    private fun cycleTimer() {
+        timerSeconds = when (timerSeconds) { 0 -> 3; 3 -> 5; 5 -> 10; else -> 0 }
+        getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit()
+            .putInt("timer_seconds", timerSeconds).apply()
+        refreshProControls()
+        Toast.makeText(this, "Timer: ${timerLabel()}", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun cycleQuality() {
+        when {
+            ultraHdMode -> {
+                ultraHdMode = false
+                photoQuality = 85
+            }
+            photoQuality == 85 -> photoQuality = 94
+            photoQuality == 94 -> photoQuality = 100
+            else -> {
+                ultraHdMode = true
+                photoQuality = 100
+            }
+        }
+        getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit()
+            .putInt("photo_quality", photoQuality)
+            .putBoolean("ultra_hd_mode", ultraHdMode)
+            .apply()
+        refreshProControls()
+        if (ultraHdMode) {
+            startCamera()
+            Toast.makeText(this, "Ultra HD: highest compatible ~4K resolution, JPEG 100%", Toast.LENGTH_LONG).show()
+        } else {
+            Toast.makeText(this, "Photo quality: ${qualityLabel()} ($photoQuality%)", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun refreshProControls() {
+        if (::timerButton.isInitialized) timerButton.text = "Timer ${timerLabel()}"
+        if (::qualityButton.isInitialized) qualityButton.text = qualityLabel()
+    }
+
+    private fun changeZoom(delta: Float) {
+        if (cameraControl == null) {
+            Toast.makeText(this, "Camera abhi ready nahi hai", Toast.LENGTH_SHORT).show()
+            return
+        }
+        zoomRatio = (zoomRatio + delta).coerceIn(1f, maxZoomRatio.coerceAtLeast(1f))
+        cameraControl?.setZoomRatio(zoomRatio)
+        if (::zoomLabel.isInitialized) zoomLabel.text = "%.1f×".format(Locale.US, zoomRatio)
+    }
+
+    private fun changeExposure(delta: Int) {
+        val next = (exposureIndex + delta).coerceIn(minExposureIndex, maxExposureIndex)
+        if (next == exposureIndex) {
+            Toast.makeText(this, "Exposure limit reached", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            cameraControl?.setExposureCompensationIndex(next)
+            exposureIndex = next
+            val ev = cameraControl?.let { next }
+            Toast.makeText(this, "Exposure index: ${ev ?: next}", Toast.LENGTH_SHORT).show()
+        } catch (_: Exception) {
+            Toast.makeText(this, "Exposure control available nahi hai", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun requestNeededPermissions() {
@@ -196,14 +442,38 @@ class MainActivity : AppCompatActivity() {
                 val preview = Preview.Builder().build().also {
                     it.surfaceProvider = previewView.surfaceProvider
                 }
-                imageCapture = ImageCapture.Builder()
-                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                    .build()
+                val captureBuilder = ImageCapture.Builder()
+                    .setCaptureMode(if (ultraHdMode) ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
+                                    else ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                if (ultraHdMode) {
+                    // Aim for UHD/4K-sized output while allowing CameraX to select a compatible size.
+                    // The actual resolution depends on the camera hardware.
+                    captureBuilder.setResolutionSelector(
+                        ResolutionSelector.Builder()
+                            .setResolutionStrategy(
+                                ResolutionStrategy(
+                                    Size(3840, 2160),
+                                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                                )
+                            )
+                            .build()
+                    )
+                }
+                imageCapture = captureBuilder.build()
                 val selector = CameraSelector.Builder()
                     .requireLensFacing(cameraFacing).build()
                 provider.unbindAll()
                 val camera = provider.bindToLifecycle(this, selector, preview, imageCapture)
                 cameraControl = camera.cameraControl
+                maxZoomRatio = camera.cameraInfo.zoomState.value?.maxZoomRatio ?: 4f
+                zoomRatio = 1f
+                cameraControl?.setZoomRatio(zoomRatio)
+                val exposure = camera.cameraInfo.exposureState
+                minExposureIndex = exposure.exposureCompensationRange.lower
+                maxExposureIndex = exposure.exposureCompensationRange.upper
+                exposureIndex = exposure.exposureCompensationIndex.coerceIn(minExposureIndex, maxExposureIndex)
+                runOnUiThread { if (::zoomLabel.isInitialized) zoomLabel.text = "1.0×" }
+                setupPreviewGestures()
                 if (flashEnabled && cameraFacing == CameraSelector.LENS_FACING_BACK) {
                     cameraControl?.enableTorch(true)
                 }
@@ -271,8 +541,44 @@ class MainActivity : AppCompatActivity() {
                     .putBoolean("show_place_name", showPlaceName)
                     .apply()
             }
-            .setPositiveButton("Watermark position") { _, _ -> showPositionDialog() }
+            .setPositiveButton("Position") { _, _ -> showPositionDialog() }
+            .setNegativeButton("Style") { _, _ -> showWatermarkStyleDialog() }
             .setNeutralButton("Done", null)
+            .show()
+    }
+
+    private fun showWatermarkStyleDialog() {
+        val colors = arrayOf("White", "Yellow", "Cyan")
+        val colorValues = intArrayOf(Color.WHITE, Color.YELLOW, Color.CYAN)
+        val selectedColor = colorValues.indexOf(watermarkTextColor).let { if (it < 0) 0 else it }
+        AlertDialog.Builder(this)
+            .setTitle("Watermark text color")
+            .setSingleChoiceItems(colors, selectedColor) { dialog, which ->
+                watermarkTextColor = colorValues[which]
+                getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit()
+                    .putInt("watermark_text_color", watermarkTextColor).apply()
+                dialog.dismiss()
+                showWatermarkBackgroundDialog()
+            }
+            .setNegativeButton("Cancel", null)
+            .setOnCancelListener { }
+            .show()
+    }
+
+    private fun showWatermarkBackgroundDialog() {
+        val labels = arrayOf("Subtle", "Medium", "Dark")
+        val alphas = intArrayOf(0x40, 0x99, 0xE0)
+        val selected = alphas.indexOf(watermarkBackgroundAlpha).let { if (it < 0) 1 else it }
+        AlertDialog.Builder(this)
+            .setTitle("Watermark background")
+            .setSingleChoiceItems(labels, selected) { dialog, which ->
+                watermarkBackgroundAlpha = alphas[which]
+                getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit()
+                    .putInt("watermark_bg_alpha", watermarkBackgroundAlpha).apply()
+                dialog.dismiss()
+                Toast.makeText(this, "Watermark style saved", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
             .show()
     }
 
@@ -322,6 +628,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun takePhoto() {
+        if (countdownActive) return
+        if (timerSeconds <= 0) {
+            capturePhotoNow()
+            return
+        }
+        countdownActive = true
+        var remaining = timerSeconds
+        val countdown = object : Runnable {
+            override fun run() {
+                if (remaining <= 0) {
+                    countdownActive = false
+                    capturePhotoNow()
+                } else {
+                    Toast.makeText(this@MainActivity, "Photo in $remaining...", Toast.LENGTH_SHORT).show()
+                    remaining--
+                    mainHandler.postDelayed(this, 1000L)
+                }
+            }
+        }
+        mainHandler.post(countdown)
+    }
+
+    private fun capturePhotoNow() {
         val capture = imageCapture ?: run {
             Toast.makeText(this, "Camera abhi ready nahi hai.", Toast.LENGTH_SHORT).show()
             return
@@ -413,7 +742,7 @@ class MainActivity : AppCompatActivity() {
 
         val textSize = 30f * scale.coerceAtLeast(0.65f)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
+            color = watermarkTextColor
             this.textSize = textSize
             typeface = android.graphics.Typeface.create("sans-serif-medium",
                 android.graphics.Typeface.BOLD)
@@ -422,7 +751,7 @@ class MainActivity : AppCompatActivity() {
         val lineHeight = textSize * 1.35f
         val maxWidth = lines.maxOf { paint.measureText(it) }
         val boxHeight = lineHeight * lines.size + padding
-        val box = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0x99000000.toInt() }
+        val box = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = (watermarkBackgroundAlpha shl 24) or 0x000000 }
         val left = padding
         val top = padding
         val boxWidth = maxWidth + padding * 1.5f
@@ -478,7 +807,7 @@ class MainActivity : AppCompatActivity() {
         val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
         return try {
             resolver.openOutputStream(uri)?.use { stream ->
-                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 94, stream))
+                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, photoQuality, stream))
                     throw IllegalStateException("JPEG encode failed")
             } ?: throw IllegalStateException("Gallery stream unavailable")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -489,6 +818,24 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             resolver.delete(uri, null, null)
             throw e
+        }
+    }
+
+    private class GridOverlay(context: android.content.Context) : View(context) {
+        private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0x99FFFFFF.toInt()
+            strokeWidth = 1.5f
+            style = Paint.Style.STROKE
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val thirdW = width / 3f
+            val thirdH = height / 3f
+            for (i in 1..2) {
+                canvas.drawLine(thirdW * i, 0f, thirdW * i, height.toFloat(), gridPaint)
+                canvas.drawLine(0f, thirdH * i, width.toFloat(), thirdH * i, gridPaint)
+            }
         }
     }
 
@@ -508,6 +855,7 @@ class MainActivity : AppCompatActivity() {
         try { locationManager?.removeUpdates(object : LocationListener {
             override fun onLocationChanged(location: Location) {}
         }) } catch (_: Exception) {}
+        mainHandler.removeCallbacksAndMessages(null)
         cameraExecutor.shutdown()
     }
 }
