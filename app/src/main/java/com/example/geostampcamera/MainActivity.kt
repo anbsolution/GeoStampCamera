@@ -44,6 +44,16 @@ import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.Preview
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.MediaStoreOutputOptions
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
+import androidx.camera.video.VideoRecordEvent
+import androidx.camera.extensions.ExtensionMode
+import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
@@ -63,6 +73,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var captureButton: Button
     private lateinit var cameraExecutor: ExecutorService
     private var imageCapture: ImageCapture? = null
+    private var videoCapture: VideoCapture<Recorder>? = null
+    private var activeRecording: Recording? = null
+    private var currentMode = "PHOTO"
+    private var customLogoUri: String? = null
     private var currentLocation: Location? = null
     private var locationManager: LocationManager? = null
     private var cameraFacing = CameraSelector.LENS_FACING_BACK
@@ -89,8 +103,22 @@ class MainActivity : AppCompatActivity() {
     private var ultraHdMode = false
     private var watermarkTextColor = Color.WHITE
     private var watermarkBackgroundAlpha = 0x99
+    private var customWatermarkText = ""
+    private var watermarkTemplate = 0
     private var countdownActive = false
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    private val logoPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            try {
+                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (_: Exception) { }
+            customLogoUri = uri.toString()
+            getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit()
+                .putString("custom_logo_uri", customLogoUri).apply()
+            Toast.makeText(this, "Watermark logo selected", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
@@ -118,6 +146,9 @@ class MainActivity : AppCompatActivity() {
         ultraHdMode = prefs.getBoolean("ultra_hd_mode", false)
         watermarkTextColor = prefs.getInt("watermark_text_color", Color.WHITE)
         watermarkBackgroundAlpha = prefs.getInt("watermark_bg_alpha", 0x99).coerceIn(0x40, 0xE0)
+        customWatermarkText = prefs.getString("custom_watermark_text", "") ?: ""
+        watermarkTemplate = prefs.getInt("watermark_template", 0).coerceIn(0, 3)
+        customLogoUri = prefs.getString("custom_logo_uri", null)
         buildUi()
         requestNeededPermissions()
     }
@@ -257,7 +288,9 @@ class MainActivity : AppCompatActivity() {
             text = "◉  PHOTO"
             textSize = 18f
             contentDescription = "Take photo"
-            setOnClickListener { takePhoto() }
+            setOnClickListener {
+                if (currentMode == "VIDEO") toggleVideoRecording() else takePhoto()
+            }
         }
         styleButton(captureButton, accent, Color.rgb(4, 28, 27), 17f)
         captureRow.addView(captureButton, LinearLayout.LayoutParams(
@@ -281,17 +314,33 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        listOf("PHOTO", "VIDEO", "PORTRAIT", "MORE").forEachIndexed { index, label ->
+        val modeButtons = mutableListOf<Button>()
+        listOf("PHOTO", "VIDEO", "PORTRAIT", "MORE").forEach { label ->
             val b = Button(this).apply {
                 text = label
                 setOnClickListener {
-                    Toast.makeText(this@MainActivity,
-                        if (index == 0) "Photo mode active" else label + " mode is not available yet",
-                        Toast.LENGTH_SHORT).show()
+                    if (label == "MORE") {
+                        showSettingsDialog()
+                    } else {
+                        if (activeRecording != null && label != "VIDEO") {
+                            Toast.makeText(this@MainActivity, "Stop recording before changing mode", Toast.LENGTH_SHORT).show()
+                        } else {
+                            currentMode = label
+                            modeButtons.forEach { button ->
+                                val selected = button.text.toString() == currentMode
+                                button.background = rounded(if (selected) Color.rgb(7, 48, 46) else bg)
+                                button.setTextColor(if (selected) accent else muted)
+                            }
+                            captureButton.text = if (currentMode == "VIDEO") "●  RECORD" else if (currentMode == "PORTRAIT") "◉  PORTRAIT" else "◉  PHOTO"
+                            startCamera()
+                            if (currentMode == "PORTRAIT") Toast.makeText(this@MainActivity, "Portrait mode uses device-supported Bokeh effect when available", Toast.LENGTH_LONG).show()
+                        }
+                    }
                 }
             }
-            styleButton(b, if (index == 0) Color.rgb(7, 48, 46) else bg,
-                if (index == 0) accent else muted, 10f)
+            styleButton(b, if (label == "PHOTO") Color.rgb(7, 48, 46) else bg,
+                if (label == "PHOTO") accent else muted, 10f)
+            modeButtons.add(b)
             modes.addView(b, rowParams())
         }
         root.addView(modes)
@@ -460,10 +509,28 @@ class MainActivity : AppCompatActivity() {
                     )
                 }
                 imageCapture = captureBuilder.build()
-                val selector = CameraSelector.Builder()
-                    .requireLensFacing(cameraFacing).build()
+                val recorder = Recorder.Builder()
+                    .setQualitySelector(QualitySelector.from(Quality.FHD, FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)))
+                    .build()
+                videoCapture = VideoCapture.withOutput(recorder)
+                val baseSelector = CameraSelector.Builder().requireLensFacing(cameraFacing).build()
+                val selector = if (currentMode == "PORTRAIT") {
+                    try {
+                        val extensions = ExtensionsManager.getInstanceAsync(this, provider).get()
+                        if (extensions.isExtensionAvailable(baseSelector, ExtensionMode.BOKEH)) {
+                            extensions.getExtensionEnabledCameraSelector(baseSelector, ExtensionMode.BOKEH)
+                        } else {
+                            runOnUiThread { Toast.makeText(this, "Bokeh portrait effect is not supported by this camera; using normal photo", Toast.LENGTH_LONG).show() }
+                            baseSelector
+                        }
+                    } catch (_: Exception) { baseSelector }
+                } else baseSelector
                 provider.unbindAll()
-                val camera = provider.bindToLifecycle(this, selector, preview, imageCapture)
+                val camera = if (currentMode == "VIDEO") {
+                    provider.bindToLifecycle(this, selector, preview, videoCapture)
+                } else {
+                    provider.bindToLifecycle(this, selector, preview, imageCapture)
+                }
                 cameraControl = camera.cameraControl
                 maxZoomRatio = camera.cameraInfo.zoomState.value?.maxZoomRatio ?: 4f
                 zoomRatio = 1f
@@ -525,98 +592,178 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showSettingsDialog() {
-        val options = arrayOf("General • GPS", "Watermark", "Camera controls", "Advanced PRO")
-        AlertDialog.Builder(this).setTitle("GeoStamp Camera PRO • Settings")
-            .setItems(options) { _, which ->
-                when (which) {
-                    0 -> AlertDialog.Builder(this).setTitle("Location & GPS")
-                        .setMultiChoiceItems(
-                            arrayOf("Show date & time", "Show GPS coordinates", "Show place name"),
-                            booleanArrayOf(showDateTime, showCoordinates, showPlaceName)
-                        ) { _, index, checked ->
-                            when (index) {
-                                0 -> showDateTime = checked
-                                1 -> showCoordinates = checked
-                                2 -> showPlaceName = checked
-                            }
-                            getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit()
-                                .putBoolean("show_date_time", showDateTime)
-                                .putBoolean("show_coordinates", showCoordinates)
-                                .putBoolean("show_place_name", showPlaceName).apply()
-                        }.setPositiveButton("Done", null).show()
-                    1 -> AlertDialog.Builder(this).setTitle("Watermark")
-                        .setItems(arrayOf("Position", "Text color and background")) { _, choice ->
-                            if (choice == 0) showPositionDialog() else showWatermarkStyleDialog()
-                        }.show()
-                    2 -> AlertDialog.Builder(this).setTitle("Camera controls")
-                        .setItems(arrayOf(
-                            "Timer: " + timerLabel(), "Photo quality: " + qualityLabel(),
-                            "Zoom", "Exposure", "Aspect ratio", "Grid lines"
-                        )) { _, choice ->
-                            when (choice) {
-                                0 -> cycleTimer()
-                                1 -> cycleQuality()
-                                2 -> AlertDialog.Builder(this).setTitle("Zoom")
-                                    .setItems(arrayOf("1.0×", "1.5×", "2.0×", "3.0×", "4.0×")) { _, i ->
-                                        val values = floatArrayOf(1f, 1.5f, 2f, 3f, 4f)
-                                        zoomRatio = values[i].coerceAtMost(maxZoomRatio).coerceAtLeast(1f)
-                                        cameraControl?.setZoomRatio(zoomRatio)
-                                        if (::zoomLabel.isInitialized) zoomLabel.text = "%.1f×".format(Locale.US, zoomRatio)
-                                    }.show()
-                                3 -> AlertDialog.Builder(this).setTitle("Exposure")
-                                    .setItems(arrayOf("−2 EV", "−1 EV", "0 EV", "+1 EV", "+2 EV")) { _, i ->
-                                        exposureIndex = intArrayOf(-2, -1, 0, 1, 2)[i]
-                                            .coerceIn(minExposureIndex, maxExposureIndex)
-                                        cameraControl?.setExposureCompensationIndex(exposureIndex)
-                                    }.show()
-                                4 -> showAspectRatioDialog()
-                                5 -> {
-                                    gridEnabled = !gridEnabled
-                                    if (::gridOverlay.isInitialized) gridOverlay.visibility =
-                                        if (gridEnabled) View.VISIBLE else View.GONE
-                                }
-                            }
-                        }.show()
-                    3 -> AlertDialog.Builder(this).setTitle("Advanced PRO")
-                        .setItems(arrayOf(
-                            "Resolution: " + if (ultraHdMode) "Ultra HD" else "Standard",
-                            "Watermark template", "Custom field"
-                        )) { _, choice ->
-                            when (choice) {
-                                0 -> {
-                                    ultraHdMode = !ultraHdMode
-                                    photoQuality = if (ultraHdMode) 100 else 94
-                                    getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit()
-                                        .putBoolean("ultra_hd_mode", ultraHdMode)
-                                        .putInt("photo_quality", photoQuality).apply()
-                                    startCamera()
-                                    Toast.makeText(this,
-                                        "Resolution preference updated; hardware limits apply.",
-                                        Toast.LENGTH_LONG).show()
-                                }
-                                1 -> AlertDialog.Builder(this).setTitle("Watermark template")
-                                    .setItems(arrayOf("Professional", "Minimal", "Classic", "Map style")) { _, i ->
-                                        Toast.makeText(this,
-                                            "Template selected: " + arrayOf("Professional", "Minimal", "Classic", "Map style")[i],
-                                            Toast.LENGTH_SHORT).show()
-                                    }.show()
-                                2 -> {
-                                    val input = android.widget.EditText(this).apply {
-                                        hint = "Project name or note"
-                                        setText(getSharedPreferences("geostamp_settings", MODE_PRIVATE)
-                                            .getString("custom_field", ""))
-                                    }
-                                    AlertDialog.Builder(this).setTitle("Custom field").setView(input)
-                                        .setPositiveButton("Save") { _, _ ->
-                                            getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit()
-                                                .putString("custom_field", input.text.toString()).apply()
-                                            Toast.makeText(this, "Custom field saved", Toast.LENGTH_SHORT).show()
-                                        }.setNegativeButton("Cancel", null).show()
-                                }
-                            }
-                        }.show()
+        val dialog = android.app.Dialog(this)
+        val density = resources.displayMetrics.density
+        fun dp(value: Int) = (value * density).toInt()
+        val bg = Color.rgb(7, 13, 19)
+        val panel = Color.rgb(18, 29, 38)
+        val accent = Color.rgb(40, 220, 185)
+        val muted = Color.rgb(163, 183, 195)
+        fun rounded(color: Int) = GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = dp(12).toFloat()
+            setStroke(dp(1), Color.rgb(38, 62, 74))
+        }
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            setBackgroundColor(bg)
+        }
+        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        header.addView(TextView(this).apply {
+            text = "PRO SETTINGS"
+            textSize = 20f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        header.addView(Button(this).apply {
+            text = "✕"
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            background = rounded(panel)
+            setOnClickListener { dialog.dismiss() }
+        }, LinearLayout.LayoutParams(dp(48), dp(42)))
+        root.addView(header)
+        root.addView(TextView(this).apply {
+            text = "Configure GPS, watermark and camera behavior"
+            textSize = 12f
+            setTextColor(muted)
+            setPadding(0, dp(3), 0, dp(8))
+        })
+        val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        root.addView(tabs)
+        val scroll = android.widget.ScrollView(this)
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(12), 0, dp(10)) }
+        scroll.addView(content)
+        root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        val names = arrayOf("General", "Watermark", "Camera", "Advanced")
+        val tabButtons = mutableListOf<Button>()
+        fun item(title: String, detail: String, action: () -> Unit) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+                background = rounded(panel)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { action() }
+            }
+            row.addView(TextView(this).apply { text = title; textSize = 15f; setTextColor(Color.WHITE); typeface = android.graphics.Typeface.DEFAULT_BOLD })
+            row.addView(TextView(this).apply { text = detail; textSize = 12f; setTextColor(muted); setPadding(0, dp(3), 0, 0) })
+            content.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+        }
+        fun toggle(title: String, value: Boolean, update: (Boolean) -> Unit) {
+            item(title, if (value) "ON • Tap to turn off" else "OFF • Tap to turn on") { update(!value) }
+        }
+        fun render(tab: Int) {
+            content.removeAllViews()
+            tabButtons.forEachIndexed { i, b ->
+                b.setTextColor(if (i == tab) accent else muted)
+                b.background = rounded(if (i == tab) Color.rgb(7, 48, 46) else panel)
+            }
+            when (tab) {
+                0 -> {
+                    toggle("Date and time stamp", showDateTime) { showDateTime = it; getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit().putBoolean("show_date_time", it).apply(); render(tab) }
+                    toggle("GPS coordinates", showCoordinates) { showCoordinates = it; getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit().putBoolean("show_coordinates", it).apply(); render(tab) }
+                    toggle("Place name", showPlaceName) { showPlaceName = it; getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit().putBoolean("show_place_name", it).apply(); render(tab) }
+                    item("GPS status", statusText.text.toString()) { Toast.makeText(this, statusText.text, Toast.LENGTH_LONG).show() }
                 }
-            }.show()
+                1 -> {
+                    val templates = arrayOf("Professional", "Minimal", "Classic", "Map-style")
+                    item("Watermark template", templates[watermarkTemplate]) {
+                        AlertDialog.Builder(this).setTitle("Watermark template").setSingleChoiceItems(templates, watermarkTemplate) { d, which ->
+                            watermarkTemplate = which
+                            getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit().putInt("watermark_template", which).apply()
+                            d.dismiss(); render(tab)
+                        }.setNegativeButton("Cancel", null).show()
+                    }
+                    item("Watermark logo", if (customLogoUri.isNullOrBlank()) "No logo selected • tap to choose an image" else "Logo selected • tap to change or remove") {
+                        AlertDialog.Builder(this).setTitle("Watermark logo")
+                            .setItems(arrayOf("Choose image", "Remove logo")) { _, which ->
+                                if (which == 0) logoPicker.launch(arrayOf("image/*")) else {
+                                    customLogoUri = null
+                                    getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit().remove("custom_logo_uri").apply()
+                                    Toast.makeText(this, "Watermark logo removed", Toast.LENGTH_SHORT).show()
+                                }
+                            }.setNegativeButton("Cancel", null).show()
+                    }
+                    item("Custom watermark text", if (customWatermarkText.isBlank()) "Not set" else customWatermarkText) {
+                        val input = android.widget.EditText(this).apply { hint = "Project, site or note"; setText(customWatermarkText); maxLines = 2 }
+                        AlertDialog.Builder(this).setTitle("Custom watermark text").setView(input)
+                            .setPositiveButton("Save") { _, _ ->
+                                customWatermarkText = input.text.toString().trim().take(80)
+                                getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit().putString("custom_watermark_text", customWatermarkText).apply()
+                                render(tab)
+                            }.setNeutralButton("Clear") { _, _ ->
+                                customWatermarkText = ""
+                                getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit().remove("custom_watermark_text").apply()
+                                render(tab)
+                            }.setNegativeButton("Cancel", null).show()
+                    }
+                    item("Watermark position", arrayOf("Bottom left", "Bottom right", "Top left", "Top right")[watermarkPosition]) { showPositionDialog() }
+                    val colorName = if (watermarkTextColor == Color.YELLOW) "Yellow" else if (watermarkTextColor == Color.CYAN) "Cyan" else "White"
+                    item("Text color and background", "Text: " + colorName + " • Alpha: " + watermarkBackgroundAlpha) { showWatermarkStyleDialog() }
+                }
+                2 -> {
+                    item("Timer", timerLabel()) { cycleTimer(); render(tab) }
+                    item("Photo quality", qualityLabel() + " • " + photoQuality + "%") { cycleQuality(); render(tab) }
+                    val ratioNames = arrayOf("4:3", "16:9", "1:1")
+                    val ratio = getSharedPreferences("geostamp_settings", MODE_PRIVATE).getInt("aspect_ratio", 0).coerceIn(0, 2)
+                    item("Aspect ratio", ratioNames[ratio]) { showAspectRatioDialog() }
+                    item("Grid overlay", if (gridEnabled) "Enabled" else "Disabled") {
+                        gridEnabled = !gridEnabled
+                        if (::gridOverlay.isInitialized) gridOverlay.visibility = if (gridEnabled) View.VISIBLE else View.GONE
+                        render(tab)
+                    }
+                    item("Zoom", "Current: " + "%.1f×".format(Locale.US, zoomRatio) + " • pinch to zoom") {
+                        AlertDialog.Builder(this).setTitle("Zoom").setItems(arrayOf("1.0×", "1.5×", "2.0×", "3.0×", "4.0×")) { _, i ->
+                            val values = floatArrayOf(1f, 1.5f, 2f, 3f, 4f)
+                            zoomRatio = values[i].coerceAtMost(maxZoomRatio).coerceAtLeast(1f)
+                            cameraControl?.setZoomRatio(zoomRatio)
+                        }.show()
+                    }
+                    item("Exposure", "Current index: " + exposureIndex) {
+                        AlertDialog.Builder(this).setTitle("Exposure compensation").setItems(arrayOf("−2 EV", "−1 EV", "0 EV", "+1 EV", "+2 EV")) { _, i ->
+                            val target = intArrayOf(-2, -1, 0, 1, 2)[i].coerceIn(minExposureIndex, maxExposureIndex)
+                            try { cameraControl?.setExposureCompensationIndex(target); exposureIndex = target; render(tab) }
+                            catch (_: Exception) { Toast.makeText(this, "Exposure control not supported", Toast.LENGTH_SHORT).show() }
+                        }.show()
+                    }
+                }
+                3 -> {
+                    item("Resolution", if (ultraHdMode) "High-quality / compatible UHD target" else "Standard capture") {
+                        ultraHdMode = !ultraHdMode; photoQuality = if (ultraHdMode) 100 else 94
+                        getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit().putBoolean("ultra_hd_mode", ultraHdMode).putInt("photo_quality", photoQuality).apply()
+                        startCamera(); render(tab)
+                    }
+                    item("Reset settings", "Restore preferences without deleting photos") {
+                        AlertDialog.Builder(this).setTitle("Reset settings?").setMessage("This resets camera and watermark preferences only.")
+                            .setNegativeButton("Cancel", null).setPositiveButton("Reset") { _, _ ->
+                                getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit().clear().apply()
+                                showDateTime = true; showCoordinates = true; showPlaceName = true; watermarkPosition = 0
+                                timerSeconds = 0; photoQuality = 94; ultraHdMode = false; watermarkTextColor = Color.WHITE
+                                watermarkBackgroundAlpha = 0x99; customWatermarkText = ""; watermarkTemplate = 0
+                                startCamera(); render(tab)
+                            }.show()
+                    }
+                    item("Feature status", "Photo capture and GPS watermark are available. Video recording and portrait blur still need separate implementation.") {
+                        Toast.makeText(this, "Video and portrait are not enabled in this version", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+        names.forEachIndexed { index, name ->
+            val b = Button(this).apply {
+                text = name; isAllCaps = false; textSize = 10f; setPadding(dp(2), 0, dp(2), 0)
+                setTextColor(muted); background = rounded(panel); setOnClickListener { render(index) }
+            }
+            tabButtons.add(b)
+            tabs.addView(b, LinearLayout.LayoutParams(0, dp(44), 1f).apply { setMargins(dp(2), dp(8), dp(2), dp(4)) })
+        }
+        render(0)
+        dialog.setContentView(root)
+        dialog.show()
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        dialog.window?.setLayout(-1, (resources.displayMetrics.heightPixels * 0.86f).toInt())
     }
 
     private fun showWatermarkStyleDialog() {
@@ -722,6 +869,55 @@ class MainActivity : AppCompatActivity() {
         mainHandler.post(countdown)
     }
 
+    private fun toggleVideoRecording() {
+        val existing = activeRecording
+        if (existing != null) {
+            existing.stop()
+            activeRecording = null
+            captureButton.text = "●  RECORD"
+            return
+        }
+        val capture = videoCapture
+        if (capture == null) {
+            Toast.makeText(this, "Video camera is not ready yet", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val values = ContentValues().apply {
+            put(MediaStore.Video.Media.DISPLAY_NAME, "GeoStampVideo_$timestamp.mp4")
+            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/GeoStampCamera")
+            }
+        }
+        val output = MediaStoreOutputOptions.Builder(contentResolver, MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
+            .setContentValues(values).build()
+        try {
+            activeRecording = capture.output.prepareRecording(this, output)
+                .start(ContextCompat.getMainExecutor(this)) { event ->
+                    when (event) {
+                        is VideoRecordEvent.Start -> {
+                            captureButton.text = "■  STOP"
+                            Toast.makeText(this, "Video recording started (silent)", Toast.LENGTH_SHORT).show()
+                        }
+                        is VideoRecordEvent.Finalize -> {
+                            activeRecording = null
+                            captureButton.text = "●  RECORD"
+                            if (event.hasError()) {
+                                Toast.makeText(this, "Video save failed: ${event.error}", Toast.LENGTH_LONG).show()
+                            } else {
+                                Toast.makeText(this, "Video saved in Movies/GeoStampCamera", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }
+                }
+        } catch (e: Exception) {
+            activeRecording = null
+            captureButton.text = "●  RECORD"
+            Toast.makeText(this, "Could not start video: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun capturePhotoNow() {
         val capture = imageCapture ?: run {
             Toast.makeText(this, "Camera abhi ready nahi hai.", Toast.LENGTH_SHORT).show()
@@ -737,7 +933,8 @@ class MainActivity : AppCompatActivity() {
                     val bitmap = BitmapFactory.decodeFile(tempFile.absolutePath)
                         ?: throw IllegalStateException("Photo read nahi ho saki")
                     val rotated = rotateFromExif(bitmap, tempFile)
-                    val stamped = addWatermark(rotated)
+                    val cropped = cropToSelectedAspectRatio(rotated)
+                    val stamped = addWatermark(cropped)
                     val uri = saveToGallery(stamped)
                     lastSavedUri = uri
                     runOnUiThread {
@@ -749,9 +946,11 @@ class MainActivity : AppCompatActivity() {
                         else Toast.makeText(this@MainActivity, "Photo save nahi ho saki.",
                             Toast.LENGTH_LONG).show()
                     }
-                    if (stamped !== rotated) stamped.recycle()
+                    if (stamped !== cropped) stamped.recycle()
+                    if (cropped !== rotated) cropped.recycle()
                     if (rotated !== bitmap) rotated.recycle()
                     bitmap.recycle()
+                    if (uri != null) runOnUiThread { showPhotoPreview(uri) }
                 } catch (e: Exception) {
                     runOnUiThread {
                         captureButton.isEnabled = true
@@ -772,6 +971,48 @@ class MainActivity : AppCompatActivity() {
                 tempFile.delete()
             }
         })
+    }
+
+    private fun cropToSelectedAspectRatio(source: Bitmap): Bitmap {
+        val ratioIndex = getSharedPreferences("geostamp_settings", MODE_PRIVATE).getInt("aspect_ratio", 0).coerceIn(0, 2)
+        val targetRatio = when (ratioIndex) { 1 -> 16f / 9f; 2 -> 1f; else -> 4f / 3f }
+        val sourceRatio = source.width.toFloat() / source.height.toFloat()
+        val cropWidth: Int
+        val cropHeight: Int
+        if (sourceRatio > targetRatio) {
+            cropHeight = source.height
+            cropWidth = (source.height * targetRatio).toInt().coerceAtMost(source.width)
+        } else {
+            cropWidth = source.width
+            cropHeight = (source.width / targetRatio).toInt().coerceAtMost(source.height)
+        }
+        if (cropWidth <= 0 || cropHeight <= 0 || (cropWidth == source.width && cropHeight == source.height)) return source
+        return Bitmap.createBitmap(source, (source.width - cropWidth) / 2, (source.height - cropHeight) / 2, cropWidth, cropHeight)
+    }
+
+    private fun showPhotoPreview(uri: Uri) {
+        val image = android.widget.ImageView(this).apply {
+            setImageURI(uri)
+            adjustViewBounds = true
+            scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+            setBackgroundColor(Color.BLACK)
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(12, 12, 12, 4)
+            addView(image, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.48f).toInt()))
+        }
+        AlertDialog.Builder(this).setTitle("GeoStamp photo preview").setView(box)
+            .setPositiveButton("Share") { _, _ ->
+                try {
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "image/jpeg"; putExtra(Intent.EXTRA_STREAM, uri); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    startActivity(Intent.createChooser(intent, "Share GeoStamp photo"))
+                } catch (_: Exception) { Toast.makeText(this, "Photo share nahi ho saki", Toast.LENGTH_SHORT).show() }
+            }
+            .setNeutralButton("Open gallery") { _, _ -> openGallery() }
+            .setNegativeButton("Close", null).show()
     }
 
     private fun rotateFromExif(bitmap: Bitmap, file: File): Bitmap {
@@ -810,35 +1051,50 @@ class MainActivity : AppCompatActivity() {
         }
         val place = if (showPlaceName && loc != null) getPlaceName(loc) else null
         if (!place.isNullOrBlank()) lines.add(place)
+        if (customWatermarkText.isNotBlank()) lines.add(customWatermarkText)
         if (lines.isEmpty()) lines.add("GeoStamp Camera")
 
-        val textSize = 30f * scale.coerceAtLeast(0.65f)
+        val templateScale = when (watermarkTemplate) { 1 -> 0.82f; 2 -> 1.08f; 3 -> 0.92f; else -> 1f }
+        val textSize = 30f * templateScale * scale.coerceAtLeast(0.65f)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = watermarkTextColor
             this.textSize = textSize
-            typeface = android.graphics.Typeface.create("sans-serif-medium",
-                android.graphics.Typeface.BOLD)
+            typeface = android.graphics.Typeface.create(
+                if (watermarkTemplate == 2) "serif" else "sans-serif-medium",
+                if (watermarkTemplate == 1) android.graphics.Typeface.NORMAL else android.graphics.Typeface.BOLD
+            )
             setShadowLayer(3f, 1f, 1f, Color.BLACK)
         }
         val lineHeight = textSize * 1.35f
+        val logoBitmap = try {
+            customLogoUri?.let { uriText -> contentResolver.openInputStream(Uri.parse(uriText))?.use { BitmapFactory.decodeStream(it) } }
+        } catch (_: Exception) { null }
+        val logoSize = if (logoBitmap != null) 76f * scale.coerceAtLeast(0.65f) else 0f
         val maxWidth = lines.maxOf { paint.measureText(it) }
-        val boxHeight = lineHeight * lines.size + padding
-        val box = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = (watermarkBackgroundAlpha shl 24) or 0x000000 }
+        val boxHeight = lineHeight * lines.size + padding + if (logoBitmap != null) logoSize else 0f
+        val templateAlpha = when (watermarkTemplate) { 1 -> 0x30; 2 -> 0xB0; 3 -> 0x88; else -> watermarkBackgroundAlpha }
+        val box = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = (templateAlpha shl 24) or 0x000000 }
         val left = padding
         val top = padding
-        val boxWidth = maxWidth + padding * 1.5f
+        val boxWidth = maxWidth + padding * 1.5f + if (logoBitmap != null) logoSize + padding * 0.5f else 0f
         val boxLeft = if (watermarkPosition == 1 || watermarkPosition == 3)
             output.width - boxWidth - padding / 2 else padding / 2
         val boxTop = if (watermarkPosition == 2 || watermarkPosition == 3)
             top else output.height - boxHeight - padding / 2
-        val textX = boxLeft + padding / 2
+        val textX = boxLeft + padding / 2 + if (logoBitmap != null) logoSize + padding * 0.5f else 0f
+        if (logoBitmap != null) {
+            val logoRect = RectF(boxLeft + padding / 2, boxTop + padding / 2,
+                boxLeft + padding / 2 + logoSize, boxTop + padding / 2 + logoSize)
+            canvas.drawBitmap(logoBitmap, null, logoRect, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+        }
         canvas.drawRoundRect(
             RectF(boxLeft, boxTop, boxLeft + boxWidth, boxTop + boxHeight),
             12f * scale.coerceAtLeast(0.65f), 12f * scale.coerceAtLeast(0.65f), box
         )
         lines.forEachIndexed { index, line ->
-            canvas.drawText(line, textX, boxTop + padding / 2 + textSize + index * lineHeight, paint)
+            canvas.drawText(line, textX, boxTop + padding / 2 + (if (logoBitmap != null) logoSize else 0f) + textSize + index * lineHeight, paint)
         }
+        logoBitmap?.recycle()
         return output
     }
 
