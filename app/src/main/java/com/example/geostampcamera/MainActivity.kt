@@ -11,6 +11,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.location.Geocoder
+import android.media.MediaActionSound
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
@@ -76,6 +77,8 @@ class MainActivity : AppCompatActivity() {
     private var videoCapture: VideoCapture<Recorder>? = null
     private var activeRecording: Recording? = null
     private var currentMode = "PHOTO"
+    private val shutterSound = MediaActionSound()
+    private var shutterSoundEnabled = true
     private var customLogoUri: String? = null
     private var currentLocation: Location? = null
     private var locationManager: LocationManager? = null
@@ -149,6 +152,8 @@ class MainActivity : AppCompatActivity() {
         customWatermarkText = prefs.getString("custom_watermark_text", "") ?: ""
         watermarkTemplate = prefs.getInt("watermark_template", 0).coerceIn(0, 3)
         customLogoUri = prefs.getString("custom_logo_uri", null)
+        shutterSoundEnabled = prefs.getBoolean("shutter_sound_enabled", true)
+        shutterSound.load(MediaActionSound.SHUTTER_CLICK)
         buildUi()
         requestNeededPermissions()
     }
@@ -704,6 +709,11 @@ class MainActivity : AppCompatActivity() {
                     item("Text color and background", "Text: " + colorName + " • Alpha: " + watermarkBackgroundAlpha) { showWatermarkStyleDialog() }
                 }
                 2 -> {
+                    item("Capture shutter sound", if (shutterSoundEnabled) "ON • Plays a camera click on capture" else "OFF • Silent capture") {
+                        shutterSoundEnabled = !shutterSoundEnabled
+                        getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit().putBoolean("shutter_sound_enabled", shutterSoundEnabled).apply()
+                        render(tab)
+                    }
                     item("Timer", timerLabel()) { cycleTimer(); render(tab) }
                     item("Photo quality", qualityLabel() + " • " + photoQuality + "%") { cycleQuality(); render(tab) }
                     val ratioNames = arrayOf("4:3", "16:9", "1:1")
@@ -926,6 +936,9 @@ class MainActivity : AppCompatActivity() {
         captureButton.isEnabled = false
         val tempFile = File(cacheDir, "capture_${System.currentTimeMillis()}.jpg")
         val options = ImageCapture.OutputFileOptions.Builder(tempFile).build()
+        if (shutterSoundEnabled) {
+            try { shutterSound.play(MediaActionSound.SHUTTER_CLICK) } catch (_: Exception) { }
+        }
 
         capture.takePicture(options, cameraExecutor, object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(output: ImageCapture.OutputFileResults) {
@@ -1184,6 +1197,7 @@ class MainActivity : AppCompatActivity() {
             override fun onLocationChanged(location: Location) {}
         }) } catch (_: Exception) {}
         mainHandler.removeCallbacksAndMessages(null)
+        try { shutterSound.release() } catch (_: Exception) { }
         cameraExecutor.shutdown()
     }
 }
