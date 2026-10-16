@@ -123,71 +123,96 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildUi() {
-        val bg = Color.rgb(14, 17, 22)
-        val panel = Color.rgb(25, 30, 38)
-        val buttonBg = Color.rgb(43, 51, 63)
-        val accent = Color.rgb(67, 220, 190)
-        val muted = Color.rgb(171, 182, 196)
-
-        fun rounded(color: Int, radiusDp: Float = 16f): GradientDrawable = GradientDrawable().apply {
+        val bg = Color.rgb(5, 10, 15)
+        val panel = Color.rgb(18, 27, 36)
+        val accent = Color.rgb(40, 220, 185)
+        val muted = Color.rgb(166, 183, 197)
+        fun rounded(color: Int, radius: Float = 16f) = GradientDrawable().apply {
             setColor(color)
-            cornerRadius = radiusDp * resources.displayMetrics.density
+            cornerRadius = radius * resources.displayMetrics.density
+            setStroke(resources.displayMetrics.density.toInt(), Color.rgb(36, 58, 70))
         }
-        fun styleButton(button: Button, color: Int = buttonBg, textColor: Int = Color.WHITE,
-                        radius: Float = 14f, textSize: Float = 13f) {
-            button.isAllCaps = false
-            button.textSize = textSize
-            button.setTextColor(textColor)
-            button.background = rounded(color, radius)
-            button.backgroundTintList = null
-            button.minHeight = (42 * resources.displayMetrics.density).toInt()
-            button.minimumHeight = button.minHeight
-            button.setPadding(12, 0, 12, 0)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) button.stateListAnimator = null
+        fun styleButton(b: Button, color: Int = Color.rgb(24, 36, 47), textColor: Int = Color.WHITE, size: Float = 12f) {
+            b.isAllCaps = false
+            b.textSize = size
+            b.setTextColor(textColor)
+            b.background = rounded(color, 18f)
+            b.backgroundTintList = null
+            b.minHeight = (44 * resources.displayMetrics.density).toInt()
+            b.minimumHeight = b.minHeight
+            b.setPadding(4, 0, 4, 0)
+            if (Build.VERSION.SDK_INT >= 21) b.stateListAnimator = null
         }
-        fun rowParams(weight: Float = 1f): LinearLayout.LayoutParams =
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, weight).apply {
-                setMargins(4, 4, 4, 4)
-            }
-
+        fun rowParams(weight: Float = 1f) = LinearLayout.LayoutParams(0, -2, weight).apply {
+            setMargins(2, 2, 2, 2)
+        }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(bg)
-            setPadding(12, 0, 12, 8)
+            setPadding(10, 0, 10, 5)
         }
-
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(4, 14, 4, 12)
+            setPadding(3, 8, 3, 4)
         }
-        val brandStack = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val title = TextView(this).apply {
-            text = "GeoStamp Camera"
-            textSize = 21f
+        val brand = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        brand.addView(TextView(this).apply {
+            text = "GeoStamp Camera  ♛ PRO"
+            textSize = 20f
             setTextColor(Color.WHITE)
-            typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
-        }
-        val subtitle = TextView(this).apply {
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        })
+        brand.addView(TextView(this).apply {
             text = "CAPTURE • STAMP • SHARE"
             textSize = 10f
-            letterSpacing = 0.12f
+            letterSpacing = .12f
             setTextColor(muted)
-            setPadding(1, 2, 0, 0)
-        }
-        brandStack.addView(title)
-        brandStack.addView(subtitle)
-        header.addView(brandStack, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        val settingsQuick = Button(this).apply {
+        })
+        header.addView(brand, LinearLayout.LayoutParams(0, -2, 1f))
+        val gear = Button(this).apply {
             text = "⚙"
-            contentDescription = "Camera and watermark settings"
-            textSize = 20f
+            contentDescription = "Settings"
             setOnClickListener { showSettingsDialog() }
         }
-        styleButton(settingsQuick, panel, Color.WHITE, 16f, 20f)
-        settingsQuick.minWidth = (48 * resources.displayMetrics.density).toInt()
-        header.addView(settingsQuick)
+        styleButton(gear, panel, Color.WHITE, 22f)
+        header.addView(gear, LinearLayout.LayoutParams(
+            (50 * resources.displayMetrics.density).toInt(),
+            (44 * resources.displayMetrics.density).toInt()
+        ))
         root.addView(header)
+
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, 2, 0, 6)
+        }
+        fun topAction(label: String, click: () -> Unit) {
+            val b = Button(this).apply { text = label; setOnClickListener { click() } }
+            styleButton(b, bg, Color.WHITE, 10f)
+            topBar.addView(b, rowParams())
+        }
+        topAction("⟳\nFlip") {
+            cameraFacing = if (cameraFacing == CameraSelector.LENS_FACING_BACK)
+                CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
+            flashEnabled = false
+            cameraControl?.enableTorch(false)
+            startCamera()
+        }
+        topAction("⚡\nFlash") {
+            flashEnabled = !flashEnabled
+            try { cameraControl?.enableTorch(flashEnabled) }
+            catch (_: Exception) { flashEnabled = false }
+        }
+        topAction("▦\nGrid") {
+            gridEnabled = !gridEnabled
+            if (::gridOverlay.isInitialized) gridOverlay.visibility =
+                if (gridEnabled) View.VISIBLE else View.GONE
+        }
+        topAction("◷\nTimer") { cycleTimer() }
+        topAction("4:3\nRatio") { showAspectRatioDialog() }
+        topAction("•••\nMore") { showSettingsDialog() }
+        root.addView(topBar)
 
         val previewContainer = FrameLayout(this).apply {
             background = rounded(Color.BLACK, 22f)
@@ -198,119 +223,94 @@ class MainActivity : AppCompatActivity() {
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
         gridOverlay = GridOverlay(this).apply { visibility = View.GONE }
-        previewContainer.addView(previewView, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
-        ))
-        previewContainer.addView(gridOverlay, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
-        ))
-        root.addView(previewContainer, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
-        ).apply { setMargins(0, 0, 0, 10) })
-
+        previewContainer.addView(previewView, FrameLayout.LayoutParams(-1, -1))
+        previewContainer.addView(gridOverlay, FrameLayout.LayoutParams(-1, -1))
         statusText = TextView(this).apply {
             text = "Finding GPS location…"
             textSize = 12f
-            setTextColor(muted)
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(14, 9, 14, 9)
-            background = rounded(panel, 12f)
+            setTextColor(Color.WHITE)
+            setPadding(12, 8, 12, 8)
             maxLines = 2
-        }
-        root.addView(statusText, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { setMargins(0, 0, 0, 8) })
-
-        val controls = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(4, 6, 4, 2)
-            background = rounded(panel, 22f)
-        }
-        val firstRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
-        val secondRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
-        fun makeButton(label: String, action: () -> Unit): Button = Button(this).apply {
-            text = label
-            setOnClickListener { action() }
-            styleButton(this)
-        }
-        fun addRowButton(row: LinearLayout, label: String, action: () -> Unit) {
-            row.addView(makeButton(label, action), rowParams())
-        }
-        addRowButton(firstRow, "Flip") {
-            cameraFacing = if (cameraFacing == CameraSelector.LENS_FACING_BACK)
-                CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
-            flashEnabled = false
-            cameraControl?.enableTorch(false)
-            startCamera()
-        }
-        addRowButton(firstRow, if (flashEnabled) "Flash On" else "Flash") {
-            flashEnabled = !flashEnabled
-            try {
-                cameraControl?.enableTorch(flashEnabled)
-                Toast.makeText(this, if (flashEnabled) "Flash on" else "Flash off", Toast.LENGTH_SHORT).show()
-            } catch (_: Exception) {
-                flashEnabled = false
-                Toast.makeText(this, "Flash is camera par available nahi hai", Toast.LENGTH_SHORT).show()
+            background = GradientDrawable().apply {
+                setColor(0xAA101820.toInt())
+                cornerRadius = 14f * resources.displayMetrics.density
             }
         }
-        addRowButton(firstRow, "Grid") {
-            gridEnabled = !gridEnabled
-            gridOverlay.visibility = if (gridEnabled) View.VISIBLE else View.GONE
-            Toast.makeText(this, if (gridEnabled) "Grid on" else "Grid off", Toast.LENGTH_SHORT).show()
-        }
-        addRowButton(secondRow, "Gallery") { openGallery() }
-        captureButton = makeButton("●  PHOTO") { takePhoto() }.apply {
-            textSize = 15f
-            typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
-            minHeight = (54 * resources.displayMetrics.density).toInt()
-            minimumHeight = minHeight
-        }
-        styleButton(captureButton, accent, Color.rgb(8, 28, 27), 28f, 15f)
-        secondRow.addView(captureButton, rowParams(1.35f))
-        addRowButton(secondRow, "Share") { shareLastPhoto() }
+        previewContainer.addView(statusText, FrameLayout.LayoutParams(
+            -1, -2, Gravity.BOTTOM
+        ).apply { setMargins(8, 8, 8, 8) })
+        root.addView(previewContainer, LinearLayout.LayoutParams(-1, 0, 1f).apply {
+            setMargins(0, 0, 0, 6)
+        })
 
-        val proRow = LinearLayout(this).apply {
+        val captureRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 2, 0, 4)
-        }
-        val zoomMinus = makeButton("−") { changeZoom(-0.5f) }
-        proRow.addView(zoomMinus)
-        zoomLabel = TextView(this).apply {
-            text = "1.0×"
-            textSize = 13f
-            setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            setPadding(8, 8, 8, 8)
-            minWidth = 52
         }
-        proRow.addView(zoomLabel)
-        proRow.addView(makeButton("+") { changeZoom(0.5f) })
-        proRow.addView(makeButton("EV −") { changeExposure(-1) })
-        proRow.addView(makeButton("EV +") { changeExposure(1) })
-        timerButton = makeButton("Timer ${timerLabel()}") { cycleTimer() }
-        qualityButton = makeButton(qualityLabel()) { cycleQuality() }
-        proRow.addView(timerButton)
-        proRow.addView(qualityButton)
-        val proScroll = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            clipToPadding = false
-            addView(proRow)
+        val gallery = Button(this).apply {
+            text = "▣\nGallery"
+            setOnClickListener { openGallery() }
         }
-        controls.addView(firstRow)
-        controls.addView(secondRow)
-        controls.addView(proScroll, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-        ))
-        root.addView(controls)
+        styleButton(gallery, bg, Color.WHITE, 12f)
+        captureRow.addView(gallery, rowParams())
+        captureButton = Button(this).apply {
+            text = "◉  PHOTO"
+            textSize = 18f
+            contentDescription = "Take photo"
+            setOnClickListener { takePhoto() }
+        }
+        styleButton(captureButton, accent, Color.rgb(4, 28, 27), 17f)
+        captureRow.addView(captureButton, LinearLayout.LayoutParams(
+            0, (62 * resources.displayMetrics.density).toInt(), 1.3f
+        ).apply { setMargins(7, 2, 7, 2) })
+        val switch = Button(this).apply {
+            text = "▣\nSwitch"
+            setOnClickListener {
+                cameraFacing = if (cameraFacing == CameraSelector.LENS_FACING_BACK)
+                    CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
+                flashEnabled = false
+                cameraControl?.enableTorch(false)
+                startCamera()
+            }
+        }
+        styleButton(switch, bg, Color.WHITE, 12f)
+        captureRow.addView(switch, rowParams())
+        root.addView(captureRow)
+
+        val modes = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        listOf("PHOTO", "VIDEO", "PORTRAIT", "MORE").forEachIndexed { index, label ->
+            val b = Button(this).apply {
+                text = label
+                setOnClickListener {
+                    Toast.makeText(this@MainActivity,
+                        if (index == 0) "Photo mode active" else label + " mode is not available yet",
+                        Toast.LENGTH_SHORT).show()
+                }
+            }
+            styleButton(b, if (index == 0) Color.rgb(7, 48, 46) else bg,
+                if (index == 0) accent else muted, 10f)
+            modes.addView(b, rowParams())
+        }
+        root.addView(modes)
         setContentView(root)
+    }
+
+    private fun showAspectRatioDialog() {
+        val options = arrayOf("4:3 (recommended)", "16:9 (wide)", "1:1 (square)")
+        val prefs = getSharedPreferences("geostamp_settings", MODE_PRIVATE)
+        AlertDialog.Builder(this).setTitle("Aspect ratio")
+            .setSingleChoiceItems(options, prefs.getInt("aspect_ratio", 0).coerceIn(0, 2)) { dialog, which ->
+                prefs.edit().putInt("aspect_ratio", which).apply()
+                dialog.dismiss()
+                Toast.makeText(this,
+                    "Ratio preference saved; actual output depends on camera hardware.",
+                    Toast.LENGTH_LONG).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun setupPreviewGestures() {
@@ -498,7 +498,7 @@ class MainActivity : AppCompatActivity() {
             val listener = object : LocationListener {
                 override fun onLocationChanged(location: Location) {
                     currentLocation = location
-                    statusText.text = "GPS: %.5f, %.5f".format(
+                    statusText.text = "⌖  GPS: %.5f, %.5f".format(
                         Locale.US, location.latitude, location.longitude
                     )
                 }
@@ -515,36 +515,108 @@ class MainActivity : AppCompatActivity() {
                     requested = true
                 } catch (_: Exception) { }
             }
-            if (!requested) statusText.text = "Location services on karein"
+            if (!requested) statusText.text = "⌖  Location services on karein"
             currentLocation?.let {
-                statusText.text = "GPS: %.5f, %.5f".format(Locale.US, it.latitude, it.longitude)
+                statusText.text = "⌖  GPS: %.5f, %.5f".format(Locale.US, it.latitude, it.longitude)
             }
         } catch (_: Exception) {
-            statusText.text = "Location available nahi hai"
+            statusText.text = "⌖  Location available nahi hai"
         }
     }
 
     private fun showSettingsDialog() {
-        val options = arrayOf("Date & time watermark", "GPS coordinates", "Place name")
-        val checked = booleanArrayOf(showDateTime, showCoordinates, showPlaceName)
-        AlertDialog.Builder(this)
-            .setTitle("Watermark options")
-            .setMultiChoiceItems(options, checked) { _, which, isChecked ->
+        val options = arrayOf("General • GPS", "Watermark", "Camera controls", "Advanced PRO")
+        AlertDialog.Builder(this).setTitle("GeoStamp Camera PRO • Settings")
+            .setItems(options) { _, which ->
                 when (which) {
-                    0 -> showDateTime = isChecked
-                    1 -> showCoordinates = isChecked
-                    2 -> showPlaceName = isChecked
+                    0 -> AlertDialog.Builder(this).setTitle("Location & GPS")
+                        .setMultiChoiceItems(
+                            arrayOf("Show date & time", "Show GPS coordinates", "Show place name"),
+                            booleanArrayOf(showDateTime, showCoordinates, showPlaceName)
+                        ) { _, index, checked ->
+                            when (index) {
+                                0 -> showDateTime = checked
+                                1 -> showCoordinates = checked
+                                2 -> showPlaceName = checked
+                            }
+                            getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit()
+                                .putBoolean("show_date_time", showDateTime)
+                                .putBoolean("show_coordinates", showCoordinates)
+                                .putBoolean("show_place_name", showPlaceName).apply()
+                        }.setPositiveButton("Done", null).show()
+                    1 -> AlertDialog.Builder(this).setTitle("Watermark")
+                        .setItems(arrayOf("Position", "Text color and background")) { _, choice ->
+                            if (choice == 0) showPositionDialog() else showWatermarkStyleDialog()
+                        }.show()
+                    2 -> AlertDialog.Builder(this).setTitle("Camera controls")
+                        .setItems(arrayOf(
+                            "Timer: " + timerLabel(), "Photo quality: " + qualityLabel(),
+                            "Zoom", "Exposure", "Aspect ratio", "Grid lines"
+                        )) { _, choice ->
+                            when (choice) {
+                                0 -> cycleTimer()
+                                1 -> cycleQuality()
+                                2 -> AlertDialog.Builder(this).setTitle("Zoom")
+                                    .setItems(arrayOf("1.0×", "1.5×", "2.0×", "3.0×", "4.0×")) { _, i ->
+                                        val values = floatArrayOf(1f, 1.5f, 2f, 3f, 4f)
+                                        zoomRatio = values[i].coerceAtMost(maxZoomRatio).coerceAtLeast(1f)
+                                        cameraControl?.setZoomRatio(zoomRatio)
+                                        if (::zoomLabel.isInitialized) zoomLabel.text = "%.1f×".format(Locale.US, zoomRatio)
+                                    }.show()
+                                3 -> AlertDialog.Builder(this).setTitle("Exposure")
+                                    .setItems(arrayOf("−2 EV", "−1 EV", "0 EV", "+1 EV", "+2 EV")) { _, i ->
+                                        exposureIndex = intArrayOf(-2, -1, 0, 1, 2)[i]
+                                            .coerceIn(minExposureIndex, maxExposureIndex)
+                                        cameraControl?.setExposureCompensationIndex(exposureIndex)
+                                    }.show()
+                                4 -> showAspectRatioDialog()
+                                5 -> {
+                                    gridEnabled = !gridEnabled
+                                    if (::gridOverlay.isInitialized) gridOverlay.visibility =
+                                        if (gridEnabled) View.VISIBLE else View.GONE
+                                }
+                            }
+                        }.show()
+                    3 -> AlertDialog.Builder(this).setTitle("Advanced PRO")
+                        .setItems(arrayOf(
+                            "Resolution: " + if (ultraHdMode) "Ultra HD" else "Standard",
+                            "Watermark template", "Custom field"
+                        )) { _, choice ->
+                            when (choice) {
+                                0 -> {
+                                    ultraHdMode = !ultraHdMode
+                                    photoQuality = if (ultraHdMode) 100 else 94
+                                    getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit()
+                                        .putBoolean("ultra_hd_mode", ultraHdMode)
+                                        .putInt("photo_quality", photoQuality).apply()
+                                    startCamera()
+                                    Toast.makeText(this,
+                                        "Resolution preference updated; hardware limits apply.",
+                                        Toast.LENGTH_LONG).show()
+                                }
+                                1 -> AlertDialog.Builder(this).setTitle("Watermark template")
+                                    .setItems(arrayOf("Professional", "Minimal", "Classic", "Map style")) { _, i ->
+                                        Toast.makeText(this,
+                                            "Template selected: " + arrayOf("Professional", "Minimal", "Classic", "Map style")[i],
+                                            Toast.LENGTH_SHORT).show()
+                                    }.show()
+                                2 -> {
+                                    val input = android.widget.EditText(this).apply {
+                                        hint = "Project name or note"
+                                        setText(getSharedPreferences("geostamp_settings", MODE_PRIVATE)
+                                            .getString("custom_field", ""))
+                                    }
+                                    AlertDialog.Builder(this).setTitle("Custom field").setView(input)
+                                        .setPositiveButton("Save") { _, _ ->
+                                            getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit()
+                                                .putString("custom_field", input.text.toString()).apply()
+                                            Toast.makeText(this, "Custom field saved", Toast.LENGTH_SHORT).show()
+                                        }.setNegativeButton("Cancel", null).show()
+                                }
+                            }
+                        }.show()
                 }
-                getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit()
-                    .putBoolean("show_date_time", showDateTime)
-                    .putBoolean("show_coordinates", showCoordinates)
-                    .putBoolean("show_place_name", showPlaceName)
-                    .apply()
-            }
-            .setPositiveButton("Position") { _, _ -> showPositionDialog() }
-            .setNegativeButton("Style") { _, _ -> showWatermarkStyleDialog() }
-            .setNeutralButton("Done", null)
-            .show()
+            }.show()
     }
 
     private fun showWatermarkStyleDialog() {
