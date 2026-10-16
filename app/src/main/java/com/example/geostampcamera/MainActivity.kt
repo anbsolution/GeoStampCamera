@@ -2,6 +2,7 @@ package com.example.geostampcamera
 
 import android.Manifest
 import android.content.ContentValues
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -20,6 +21,7 @@ import android.provider.MediaStore
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
+import android.app.AlertDialog
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -27,6 +29,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.CameraControl
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
@@ -51,6 +54,13 @@ class MainActivity : AppCompatActivity() {
     private var currentLocation: Location? = null
     private var locationManager: LocationManager? = null
     private var cameraFacing = CameraSelector.LENS_FACING_BACK
+    private var cameraControl: CameraControl? = null
+    private var flashEnabled = false
+    private var lastSavedUri: Uri? = null
+    private var showDateTime = true
+    private var showCoordinates = true
+    private var showPlaceName = true
+    private var watermarkPosition = 0 // 0=bottom-left, 1=bottom-right, 2=top-left, 3=top-right
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
@@ -68,6 +78,11 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         cameraExecutor = Executors.newSingleThreadExecutor()
+        val prefs = getSharedPreferences("geostamp_settings", MODE_PRIVATE)
+        showDateTime = prefs.getBoolean("show_date_time", true)
+        showCoordinates = prefs.getBoolean("show_coordinates", true)
+        showPlaceName = prefs.getBoolean("show_place_name", true)
+        watermarkPosition = prefs.getInt("watermark_position", 0).coerceIn(0, 3)
         buildUi()
         requestNeededPermissions()
     }
@@ -104,27 +119,49 @@ class MainActivity : AppCompatActivity() {
         root.addView(statusText)
 
         val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(8, 4, 8, 14)
+        }
+        val firstRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(8, 8, 8, 18)
         }
-        val switchButton = Button(this).apply {
-            text = "Flip"
-            setOnClickListener {
-                cameraFacing = if (cameraFacing == CameraSelector.LENS_FACING_BACK)
-                    CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
-                startCamera()
+        val secondRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        fun makeButton(label: String, action: () -> Unit): Button = Button(this).apply {
+            text = label
+            isAllCaps = false
+            setOnClickListener { action() }
+        }
+        firstRow.addView(makeButton("Flip") {
+            cameraFacing = if (cameraFacing == CameraSelector.LENS_FACING_BACK)
+                CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
+            flashEnabled = false
+            cameraControl?.enableTorch(false)
+            startCamera()
+        })
+        firstRow.addView(makeButton("Flash") {
+            flashEnabled = !flashEnabled
+            try {
+                cameraControl?.enableTorch(flashEnabled)
+                Toast.makeText(this, if (flashEnabled) "Flash on" else "Flash off", Toast.LENGTH_SHORT).show()
+            } catch (_: Exception) {
+                flashEnabled = false
+                Toast.makeText(this, "Flash is camera par available nahi hai", Toast.LENGTH_SHORT).show()
             }
-        }
-        captureButton = Button(this).apply {
-            text = "PHOTO"
-            textSize = 16f
-            setOnClickListener { takePhoto() }
-        }
-        controls.addView(switchButton)
-        controls.addView(captureButton)
-        root.addView(controls)
+        })
+        firstRow.addView(makeButton("Settings") { showSettingsDialog() })
 
+        secondRow.addView(makeButton("Gallery") { openGallery() })
+        captureButton = makeButton("PHOTO") { takePhoto() }.apply { textSize = 16f }
+        secondRow.addView(captureButton)
+        secondRow.addView(makeButton("Share") { shareLastPhoto() })
+        controls.addView(firstRow)
+        controls.addView(secondRow)
+        root.addView(controls)
         setContentView(root)
     }
 
@@ -164,7 +201,11 @@ class MainActivity : AppCompatActivity() {
                 val selector = CameraSelector.Builder()
                     .requireLensFacing(cameraFacing).build()
                 provider.unbindAll()
-                provider.bindToLifecycle(this, selector, preview, imageCapture)
+                val camera = provider.bindToLifecycle(this, selector, preview, imageCapture)
+                cameraControl = camera.cameraControl
+                if (flashEnabled && cameraFacing == CameraSelector.LENS_FACING_BACK) {
+                    cameraControl?.enableTorch(true)
+                }
             } catch (e: Exception) {
                 Toast.makeText(this, "Camera start nahi hua: ${e.message}", Toast.LENGTH_LONG).show()
             }
@@ -212,6 +253,73 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun showSettingsDialog() {
+        val options = arrayOf("Date & time watermark", "GPS coordinates", "Place name")
+        val checked = booleanArrayOf(showDateTime, showCoordinates, showPlaceName)
+        AlertDialog.Builder(this)
+            .setTitle("Watermark options")
+            .setMultiChoiceItems(options, checked) { _, which, isChecked ->
+                when (which) {
+                    0 -> showDateTime = isChecked
+                    1 -> showCoordinates = isChecked
+                    2 -> showPlaceName = isChecked
+                }
+                getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit()
+                    .putBoolean("show_date_time", showDateTime)
+                    .putBoolean("show_coordinates", showCoordinates)
+                    .putBoolean("show_place_name", showPlaceName)
+                    .apply()
+            }
+            .setPositiveButton("Watermark position") { _, _ -> showPositionDialog() }
+            .setNeutralButton("Done", null)
+            .show()
+    }
+
+    private fun showPositionDialog() {
+        val positions = arrayOf("Bottom left", "Bottom right", "Top left", "Top right")
+        AlertDialog.Builder(this)
+            .setTitle("Watermark position")
+            .setSingleChoiceItems(positions, watermarkPosition) { dialog, which ->
+                watermarkPosition = which
+                getSharedPreferences("geostamp_settings", MODE_PRIVATE).edit()
+                    .putInt("watermark_position", which).apply()
+                dialog.dismiss()
+                Toast.makeText(this, "Position: ${positions[which]}", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun openGallery() {
+        try {
+            val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                type = "image/*"
+                addCategory(Intent.CATEGORY_OPENABLE)
+            }
+            startActivity(Intent.createChooser(intent, "Open photo gallery"))
+        } catch (_: Exception) {
+            Toast.makeText(this, "Gallery app nahi mili", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun shareLastPhoto() {
+        val uri = lastSavedUri
+        if (uri == null) {
+            Toast.makeText(this, "Pehle ek photo lein, phir Share karein", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "image/jpeg"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(intent, "Share GeoStamp photo"))
+        } catch (_: Exception) {
+            Toast.makeText(this, "Photo share nahi ho saki", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private fun takePhoto() {
         val capture = imageCapture ?: run {
             Toast.makeText(this, "Camera abhi ready nahi hai.", Toast.LENGTH_SHORT).show()
@@ -229,6 +337,7 @@ class MainActivity : AppCompatActivity() {
                     val rotated = rotateFromExif(bitmap, tempFile)
                     val stamped = addWatermark(rotated)
                     val uri = saveToGallery(stamped)
+                    lastSavedUri = uri
                     runOnUiThread {
                         captureButton.isEnabled = true
                         if (uri != null) Toast.makeText(
@@ -286,16 +395,20 @@ class MainActivity : AppCompatActivity() {
         val canvas = Canvas(output)
         val scale = output.width / 1080f
         val padding = 26f * scale.coerceAtLeast(0.65f)
-        val dateText = SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(Date())
-        val timeText = SimpleDateFormat("hh:mm:ss a", Locale.getDefault()).format(Date())
+        val now = Date()
         val loc = currentLocation
-        val coordinates = if (loc != null)
-            "GPS: %.6f, %.6f".format(Locale.US, loc.latitude, loc.longitude)
-        else "GPS: Location unavailable"
-
-        val place = if (loc != null) getPlaceName(loc) else null
-        val lines = mutableListOf(dateText, timeText, coordinates)
+        val lines = mutableListOf<String>()
+        if (showDateTime) {
+            lines.add(SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(now))
+            lines.add(SimpleDateFormat("hh:mm:ss a", Locale.getDefault()).format(now))
+        }
+        if (showCoordinates) {
+            lines.add(if (loc != null) "GPS: %.6f, %.6f".format(Locale.US, loc.latitude, loc.longitude)
+                else "GPS: Location unavailable")
+        }
+        val place = if (showPlaceName && loc != null) getPlaceName(loc) else null
         if (!place.isNullOrBlank()) lines.add(place)
+        if (lines.isEmpty()) lines.add("GeoStamp Camera")
 
         val textSize = 30f * scale.coerceAtLeast(0.65f)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -310,13 +423,19 @@ class MainActivity : AppCompatActivity() {
         val boxHeight = lineHeight * lines.size + padding
         val box = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0x99000000.toInt() }
         val left = padding
-        val bottom = output.height - padding
+        val top = padding
+        val boxWidth = maxWidth + padding * 1.5f
+        val boxLeft = if (watermarkPosition == 1 || watermarkPosition == 3)
+            output.width - boxWidth - padding / 2 else padding / 2
+        val boxTop = if (watermarkPosition == 2 || watermarkPosition == 3)
+            top else output.height - boxHeight - padding / 2
+        val textX = boxLeft + padding / 2
         canvas.drawRoundRect(
-            RectF(left / 2, bottom - boxHeight, left + maxWidth + padding, bottom + padding / 2),
+            RectF(boxLeft, boxTop, boxLeft + boxWidth, boxTop + boxHeight),
             12f * scale.coerceAtLeast(0.65f), 12f * scale.coerceAtLeast(0.65f), box
         )
         lines.forEachIndexed { index, line ->
-            canvas.drawText(line, left, bottom - (lines.size - 1 - index) * lineHeight, paint)
+            canvas.drawText(line, textX, boxTop + padding / 2 + textSize + index * lineHeight, paint)
         }
         return output
     }
